@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+*.db
+strategies/
+data/kuairec/*.csv
+data/kuairec/*.zip
+data/amazon_reviews/
+.venv/
