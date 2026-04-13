@@ -25,6 +25,7 @@ from src.config import ProjectConfig
 from src.llm_factory import create_llm
 from src.memory.campaign_log import CampaignLog
 from src.memory.strategy_lib import StrategyLibrary
+from src.memory.user_profile import UserProfileStore
 from src.models import CampaignResult, ContentItem, Strategy, UserProfile
 from src.simulation.ad_environment import AdEnvironment
 
@@ -61,9 +62,19 @@ class EvoAdAgent:
         self._distiller_llm = create_llm(self.config.distiller_llm)
         self._simulator_llm = create_llm(self.config.simulator_llm)
 
-        # Memory
+        # Memory — all four layers
         self.campaign_log = CampaignLog(self.config.db_path)
-        self.strategy_lib = StrategyLibrary(self.config.strategy_dir)
+        self.strategy_lib = StrategyLibrary(
+            self.config.strategy_dir,
+            emb_config=self.config.emb_config,
+        )
+        # L2 user profile store: built lazily in setup_environment() once we
+        # have the concrete users. Requires emb_config; None disables it.
+        self.user_profile_store: UserProfileStore | None = (
+            UserProfileStore(emb_config=self.config.emb_config)
+            if self.config.emb_config is not None
+            else None
+        )
 
         # Modules
         self.executor = AdExecutor(self._executor_llm, self.strategy_lib)
@@ -77,8 +88,10 @@ class EvoAdAgent:
         self.evolution_graph = self._build_evolution_graph()
 
     def setup_environment(self, users: list[UserProfile], contents: list[ContentItem]):
-        """Initialize the simulation environment."""
+        """Initialize the simulation environment and build the L2 user profile index."""
         self.env = AdEnvironment.create(users, contents, self._simulator_llm)
+        if self.user_profile_store is not None and users:
+            self.user_profile_store.build(users)
 
     def _build_evolution_graph(self) -> StateGraph:
         """Build the outer LangGraph for the evolution cycle."""
@@ -97,8 +110,12 @@ class EvoAdAgent:
             # Inner LangGraph: ReAct agent makes decisions
             actions = self.executor.execute(round_users, round_contents, scenario)
 
-            # Simulate user feedback
-            strategy_name = self._current_strategy_name(scenario)
+            # Simulate user feedback. Tag this campaign with whichever strategies
+            # the executor actually retrieved, not just the keyword match.
+            applied = self.executor.last_applied_strategies
+            strategy_name = (
+                "+".join(applied[:2]) if applied else self._current_strategy_name(scenario)
+            )
             result = self.env.step(actions, strategy_name)
 
             # Persist
@@ -242,6 +259,18 @@ class EvoAdAgent:
         print(f"  EvoAdAgent Evolution — {rounds} rounds")
         print(f"  Scenario: {scenario or 'general'}")
         print(f"  Initial strategies: {self.strategy_lib.count()}")
+        l3_status = (
+            f"{self.strategy_lib._faiss_index.ntotal} strategies"
+            if self.strategy_lib.has_vector_index
+            else ("configured (empty)" if self.config.emb_config else "disabled")
+        )
+        print(f"  L3 Strategy FAISS index: {l3_status}")
+        l2_status = (
+            f"{self.user_profile_store.count()} users"
+            if self.user_profile_store and self.user_profile_store.count() > 0
+            else "disabled"
+        )
+        print(f"  L2 User Profile FAISS index: {l2_status}")
         print(f"{'='*60}\n")
 
         for i in range(rounds):
@@ -252,6 +281,11 @@ class EvoAdAgent:
             print(f"  Completion: {summary.get('completion_rate', 0):.2%}")
             print(f"  Engagement: {summary.get('engagement_rate', 0):.2%}")
             print(f"  Insight: {str(summary.get('key_insight', ''))[:80]}")
+            applied = self.executor.last_applied_strategies
+            if applied:
+                print(f"  Applied strategies: {applied}")
+            else:
+                print(f"  Applied strategies: (none — cold start)")
             if summary.get("new_strategy"):
                 print(f"  NEW STRATEGY: {summary['new_strategy']}")
             print(f"  Strategy count: {summary.get('total_strategies', 0)}")

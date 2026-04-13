@@ -1,15 +1,41 @@
 """Tests for memory layer: CampaignLog and StrategyLibrary."""
 
+import hashlib
+
+import numpy as np
 import pytest
 
+from src.config import LLMConfig
 from src.memory.campaign_log import CampaignLog
-from src.memory.strategy_lib import StrategyLibrary
+from src.memory.strategy_lib import StrategyLibrary, strategy_to_signature
 from src.models import (
     AdReflection,
     CampaignResult,
     Strategy,
     StrategyType,
 )
+
+
+class _FakeEmbedder:
+    """Deterministic text→vector for offline tests — see test_user_profile.py."""
+
+    def __init__(self, dim: int = 32):
+        self.dim = dim
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._hash_to_vec(text).tolist()
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._hash_to_vec(t).tolist() for t in texts]
+
+    def _hash_to_vec(self, text: str) -> np.ndarray:
+        seed = int.from_bytes(
+            hashlib.sha256(text.encode("utf-8")).digest()[:4], "big"
+        )
+        rng = np.random.default_rng(seed)
+        v = rng.standard_normal(self.dim).astype("float32")
+        v /= np.linalg.norm(v) + 1e-9
+        return v
 
 
 # ============================================================
@@ -325,6 +351,27 @@ class TestStrategyLibrary:
 
     # -- strategy with parent --
 
+    # -- signature --
+
+    def test_signature_includes_core_fields(self):
+        s = Strategy(
+            strategy_id="s1",
+            name="测试策略",
+            strategy_type=StrategyType.NEW,
+            applicable_scenario="宠物推荐",
+            target_audience="年轻女性",
+            content_direction="萌宠视频",
+            execution_steps=["步骤1", "步骤2"],
+            expected_effect="+10% CTR",
+        )
+        sig = strategy_to_signature(s)
+        assert "测试策略" in sig
+        assert "宠物推荐" in sig
+        assert "年轻女性" in sig
+        assert "萌宠视频" in sig
+        # execution_steps intentionally excluded
+        assert "步骤1" not in sig
+
     def test_save_and_get_strategy_with_parent(self, lib):
         parent = self._make_strategy("s001", "原始策略")
         lib.save(parent)
@@ -347,3 +394,126 @@ class TestStrategyLibrary:
         assert loaded.parent_id == "s001"
         assert loaded.version == 2
         assert loaded.strategy_type == StrategyType.REFINE
+
+
+# ============================================================
+# StrategyLibrary — Semantic (FAISS) Search
+# ============================================================
+
+
+class TestStrategySemanticSearch:
+    @pytest.fixture()
+    def lib(self, tmp_path):
+        """StrategyLibrary with FAISS enabled via a fake embedder."""
+        lib = StrategyLibrary(
+            strategy_dir=tmp_path / "strategies",
+            emb_config=LLMConfig(provider="openai", model="fake"),
+        )
+        lib._embedder = _FakeEmbedder(dim=32)
+        return lib
+
+    def _make(self, sid, scenario, audience="通用人群", direction="通用内容"):
+        return Strategy(
+            strategy_id=sid,
+            name=f"策略{sid}",
+            strategy_type=StrategyType.NEW,
+            applicable_scenario=scenario,
+            target_audience=audience,
+            content_direction=direction,
+            execution_steps=["step1"],
+            expected_effect="CTR+5%",
+        )
+
+    def test_semantic_search_empty_lib_returns_empty(self, lib):
+        assert lib.semantic_search("任意查询") == []
+
+    def test_semantic_search_after_saves(self, lib):
+        lib.save(self._make("s1", "宠物内容推荐"))
+        lib.save(self._make("s2", "美食教程推荐"))
+        lib.save(self._make("s3", "科技数码推荐"))
+
+        results = lib.semantic_search("查宠物相关", k=2)
+        assert len(results) == 2
+        for strat, dist in results:
+            assert isinstance(strat, Strategy)
+            assert dist >= 0.0
+
+    def test_semantic_search_identical_signature_nearest_to_self(self, lib):
+        s = self._make("s1", "宠物日常记录", "25-30岁女性", "萌宠视频")
+        lib.save(s)
+        lib.save(self._make("s2", "完全无关场景", "完全不同人群", "完全不同方向"))
+
+        results = lib.semantic_search(strategy_to_signature(s), k=1)
+        assert results[0][0].strategy_id == "s1"
+        assert results[0][1] == pytest.approx(0.0, abs=1e-4)
+
+    def test_semantic_search_k_capped_by_index_size(self, lib):
+        for i in range(3):
+            lib.save(self._make(f"s{i}", f"场景{i}"))
+        results = lib.semantic_search("anything", k=100)
+        assert len(results) == 3
+
+    def test_update_same_id_triggers_rebuild_no_duplicates(self, lib):
+        lib.save(self._make("s1", "版本1"))
+        lib.save(self._make("s1", "版本2"))  # overwrite
+
+        assert lib.count() == 1
+        assert lib._faiss_index.ntotal == 1
+        results = lib.semantic_search("任意", k=5)
+        assert len(results) == 1
+        assert results[0][0].applicable_scenario == "版本2"
+
+    def test_rebuild_vector_index_from_disk(self, lib):
+        lib.save(self._make("s1", "场景A"))
+        lib.save(self._make("s2", "场景B"))
+
+        n = lib.rebuild_vector_index()
+        assert n == 2
+        assert lib._faiss_index.ntotal == 2
+
+    def test_faiss_persistence_across_instances(self, tmp_path):
+        cfg = LLMConfig(provider="openai", model="fake")
+        strategy_dir = tmp_path / "strategies"
+
+        lib1 = StrategyLibrary(strategy_dir=strategy_dir, emb_config=cfg)
+        lib1._embedder = _FakeEmbedder(dim=32)
+        lib1.save(
+            Strategy(
+                strategy_id="s1",
+                name="策略1",
+                strategy_type=StrategyType.NEW,
+                applicable_scenario="宠物推荐",
+                target_audience="年轻女性",
+                content_direction="萌宠",
+                execution_steps=["step1"],
+                expected_effect="+5%",
+            )
+        )
+
+        lib2 = StrategyLibrary(strategy_dir=strategy_dir, emb_config=cfg)
+        lib2._embedder = _FakeEmbedder(dim=32)
+        assert lib2.has_vector_index
+        assert lib2._faiss_index.ntotal == 1
+        results = lib2.semantic_search("宠物相关", k=1)
+        assert len(results) == 1
+        assert results[0][0].strategy_id == "s1"
+
+    def test_no_emb_config_falls_back_to_keyword_only(self, tmp_path):
+        lib = StrategyLibrary(strategy_dir=tmp_path / "strategies")
+        lib.save(
+            Strategy(
+                strategy_id="s1",
+                name="策略",
+                strategy_type=StrategyType.NEW,
+                applicable_scenario="宠物推荐",
+                target_audience="年轻女性",
+                content_direction="萌宠",
+                execution_steps=["step1"],
+                expected_effect="+5%",
+            )
+        )
+        # semantic_search silently returns []
+        assert lib.semantic_search("任意查询") == []
+        # keyword search still works
+        assert len(lib.search("宠物")) == 1
+        assert not lib.has_vector_index

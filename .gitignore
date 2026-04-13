@@ -6,6 +6,7 @@ build/
 .env
 *.db
 strategies/
+benchmark_results/
 data/kuairec/*.csv
 data/kuairec/*.zip
 data/amazon_reviews/

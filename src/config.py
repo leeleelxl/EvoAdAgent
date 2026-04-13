@@ -48,6 +48,11 @@ class ProjectConfig:
     reflector_llm: LLMConfig = field(default_factory=lambda: LLMConfig(model="gpt-4o-mini"))
     distiller_llm: LLMConfig = field(default_factory=lambda: LLMConfig(model="gpt-4o"))
     simulator_llm: LLMConfig = field(default_factory=lambda: LLMConfig(model="gpt-4o-mini"))
+    # Embedding model for L2 user profiles and L3 strategy semantic search.
+    # Set to None to disable FAISS indexing entirely.
+    emb_config: LLMConfig | None = field(
+        default_factory=lambda: LLMConfig(provider="qwen", model="text-embedding-v2")
+    )
 
     def __post_init__(self):
         if self.data_dir is None:
@@ -64,4 +69,6 @@ class ProjectConfig:
         self.reflector_llm.resolve()
         self.distiller_llm.resolve()
         self.simulator_llm.resolve()
+        if self.emb_config is not None:
+            self.emb_config.resolve()
         return self
