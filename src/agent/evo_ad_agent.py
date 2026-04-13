@@ -76,8 +76,13 @@ class EvoAdAgent:
             else None
         )
 
-        # Modules
-        self.executor = AdExecutor(self._executor_llm, self.strategy_lib)
+        # Modules — executor gets both L2 (user_profile) and L3 (strategy_lib)
+        # so the ReAct agent can query L2 via find_similar_users tool.
+        self.executor = AdExecutor(
+            self._executor_llm,
+            strategy_lib=self.strategy_lib,
+            user_profile_store=self.user_profile_store,
+        )
         self.reflector = AdReflector(self._reflector_llm)
         self.distiller = StrategyDistiller(self._distiller_llm)
 

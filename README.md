@@ -20,9 +20,13 @@
 
 ---
 
-**EvoAdAgent** is a self-evolving agent for ad/recommendation optimization. It executes campaigns in a simulated environment, reflects on outcomes using [Reflexion](https://arxiv.org/abs/2303.11366), distills reusable strategies, and continuously improves -- all without human intervention.
+> **Positioning note.** EvoAdAgent is a **research-grade simulation** of an LLM-driven self-evolving recommendation agent in an ad-styled setting. It is **not** a production ad platform. Validation is offline and simulator-based. We make no claim that the system would work on live ad traffic without online A/B. This is the fundamental limit of offline evaluation and we acknowledge it explicitly in the [Limitations](#limitations) section.
 
-Unlike static recommendation systems, EvoAdAgent **learns from its own experience**: each campaign round produces reflections, reflections crystallize into strategies, and strategies guide future decisions. The strategy library grows autonomously over time.
+---
+
+**EvoAdAgent** is a self-evolving recommendation agent that uses LLMs to take over the **knowledge-worker parts** of ad operations -- reading briefs, executing decisions, reflecting on outcomes using [Reflexion](https://arxiv.org/abs/2303.11366), and distilling reusable strategies. Numerical-heavy parts of ad tech (bid optimization, CTR modeling, pacing) are intentionally left to traditional models -- this project is the *brain*, not the *hand*.
+
+Each round: the agent recommends, a calibrated user simulator reacts, a reflector writes a structured post-mortem, a distiller crystallizes reflections into strategies, and FAISS indexes them for retrieval on the next round. The strategy library grows autonomously; a retrospective A/B verifier (Cohen's d) separates strategies that genuinely lifted CTR from noise.
 
 ## Features
 
@@ -95,7 +99,7 @@ Unlike static recommendation systems, EvoAdAgent **learns from its own experienc
 | Layer | Name | Storage | Purpose |
 |-------|------|---------|---------|
 | L1 | Campaign Log | SQLite | Full decision traces, metrics per round |
-| L2 | User Profiles | FAISS (Qwen `text-embedding-v2`, 1536d) | Semantic nearest-neighbor retrieval over user personas |
+| L2 | User Profiles | FAISS (Qwen `text-embedding-v2`, 1536d) | Semantic nearest-neighbor retrieval over user personas; reachable from ReAct via the `find_similar_users` tool |
 | L3 | Strategy Library | Markdown + FAISS vector index | Keyword and semantic search over distilled strategies |
 | L4 | Evolution Log | View layer over L1+L3 | Evolution curves, strategy lineage, usage counts |
 
@@ -110,6 +114,7 @@ Unlike static recommendation systems, EvoAdAgent **learns from its own experienc
 | `load_strategy` | `creative_generator.py` | Load a distilled strategy into the agent's decision process |
 | `set_bid_strategy` | `bidding.py` | Compute a bid priority score from audience size + competition + mode |
 | `evaluate_performance` | `performance.py` | Compute CTR / completion rate / engagement rate + composite score |
+| `find_similar_users` | `user_retrieval.py` | Query the L2 FAISS index for users with semantically similar personas -- this is how the ReAct agent actually consumes L2 memory during cold-start or unfamiliar-user reasoning |
 
 ## Quick Start
 
@@ -346,6 +351,20 @@ Open-source projects in the "LLM agent × advertising" intersection are **scarce
 | [KuaiRec: A Fully-observed Dataset](https://arxiv.org/abs/2202.10842) | CIKM 2022 | Source of the user personas, video captions, and (planned) interaction-level ground truth |
 | [AgentRecBench](https://arxiv.org/abs/2505.19623) | NeurIPS 2025 | Offline-evaluation protocol reference for the planned real-data validator |
 
+## Limitations
+
+We take honest accounting of what this project does **not** prove seriously. Offline simulation-based evaluation has fundamental limits, and we list them here rather than hoping readers don't ask.
+
+1. **No real click logs.** The CTR numbers in the benchmarks come from an LLM-based user simulator, not real users responding to real ads. The simulator is designed with a probabilistic sampling layer to avoid "LLM-says-yes-to-everything" saturation, but it is still an approximation of human behavior.
+2. **No online A/B.** We make no claim that strategies learned in this system would transfer to live ad platforms. That requires real traffic, real advertisers, real budgets, and counterfactual setup -- all outside project scope.
+3. **No causal / OPE guarantees.** Because KuaiRec's `small_matrix` is fully-observed, we *can* sidestep selection-bias issues that plague MovieLens-style datasets, but we do **not** apply Inverse Propensity Scoring or Doubly Robust OPE. Our Verifier reports descriptive statistics (CTR lift, Cohen's d) not causal effects.
+4. **Not a production ad platform.** We intentionally do not model: bid pacing, budget constraints, creative fatigue, lookalike expansion, fraud detection, advertiser quality scores, or auction dynamics. These are all the "hand" parts of ad tech; this project is about the "brain" -- strategy reasoning done by LLMs.
+5. **Small scale.** 20 users / 16 content items / 20 rounds is an experimental setup, not industrial scale. Core claims are about *framework behavior*, not *production performance*.
+6. **Strategies may rediscover folk wisdom.** Many strategies the distiller produces ("first 3 seconds need emotional hook", "match interests before demographics") are well-known in the creative industry. The novelty is in the *autonomous extraction and verification* pipeline, not in the strategies themselves.
+7. **Validation plan is a work-in-progress.** The `Tier 1` simulator-fidelity calibration (Spearman ρ against KuaiRec watch_ratio) and `Tier 2` Evo-Agent vs Vanilla-Agent ablation with paired bootstrap are roadmap items, not completed experiments.
+
+**This project is best understood as:** a *complete reference implementation* of the Reflexion + Self-Evolution + RAG pattern applied to a recommendation scenario, with deliberate honesty about which claims are supported by current evidence.
+
 ## Roadmap
 
 ### Week 1 -- Core Framework [DONE]
@@ -370,10 +389,12 @@ Open-source projects in the "LLM agent × advertising" intersection are **scarce
 
 ### Week 3 -- Memory, Retrieval, Visualization [DONE]
 - [x] L2 User Profile FAISS index (Qwen `text-embedding-v2`)
+- [x] L2 reachable from ReAct via `find_similar_users` tool (closes the RAG loop for user personas)
 - [x] L4 Evolution Log view layer (curves, lineage, usage counts)
 - [x] Strategy retrieval by scenario similarity (L3 semantic search, wired into Executor)
 - [x] 20-round benchmark script with JSON export
 - [x] Streamlit dashboard + PNG export for README
+- [x] Honest positioning + Limitations section in README
 
 ### Week 4 -- Production & Real-data Validation [PLANNED]
 - [ ] Real-data validator on KuaiRec `small_matrix` (fully-observed, 1411 users × 3327 videos)

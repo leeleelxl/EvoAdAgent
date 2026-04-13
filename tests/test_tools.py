@@ -25,8 +25,17 @@ def _invoke(tool, **kwargs) -> str:
 
 
 class TestToolRegistry:
-    def test_get_all_tools_count(self):
+    def test_get_all_tools_count_no_store(self):
+        """Without a UserProfileStore, base 7 tools are returned."""
         assert len(get_all_tools()) == 7
+
+    def test_get_all_tools_count_with_store(self):
+        """With a UserProfileStore, find_similar_users is added (8 tools)."""
+        from src.memory.user_profile import UserProfileStore
+        store = UserProfileStore()  # empty but non-None
+        tools = get_all_tools(user_profile_store=store)
+        assert len(tools) == 8
+        assert any(t.name == "find_similar_users" for t in tools)
 
     def test_all_tools_have_names(self):
         for t in get_all_tools():
